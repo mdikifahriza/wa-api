@@ -6,6 +6,13 @@ const multer = require('multer');
 const { Server } = require('socket.io');
 const { connectToWhatsApp, sendMessage, sendDocument, getStatus } = require('./whatsapp');
 
+// Safety net terakhir: kalau ada promise rejection yang lolos dari try-catch
+// manapun, JANGAN biarkan proses mati (default behavior Node.js modern).
+// Cukup log errornya, server tetap hidup dan bisa terus melayani request.
+process.on('unhandledRejection', (err) => {
+  console.error('Unhandled rejection (server tetap jalan):', err);
+});
+
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server);
