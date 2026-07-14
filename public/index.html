@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8">
+  <title>WA Test</title>
+  <style>
+    body { font-family: sans-serif; max-width: 400px; margin: 40px auto; text-align: center; }
+    #qr { max-width: 250px; margin: 20px auto; display: none; }
+    #status { margin: 10px 0; font-weight: bold; }
+    form { display: none; flex-direction: column; gap: 10px; margin-top: 20px; }
+    input, button { padding: 8px; font-size: 14px; }
+  </style>
+</head>
+<body>
+  <h2>WhatsApp Test</h2>
+  <div id="status">Menghubungkan...</div>
+  <img id="qr" alt="QR Code">
+
+  <form id="send-form">
+    <input type="text" id="number" placeholder="Nomor tujuan (628xxxxxxxxxx)" required>
+    <input type="text" id="message" placeholder="Pesan" required>
+    <button type="submit">Kirim Pesan</button>
+  </form>
+
+  <hr style="margin: 20px 0;">
+
+  <form id="send-doc-form">
+    <input type="text" id="doc-number" placeholder="Nomor tujuan (628xxxxxxxxxx)" required>
+    <input type="file" id="doc-file" accept="application/pdf" required>
+    <input type="text" id="doc-caption" placeholder="Caption (opsional)">
+    <button type="submit">Kirim Dokumen</button>
+  </form>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script>
+    const socket = io();
+    const qrImg = document.getElementById('qr');
+    const statusEl = document.getElementById('status');
+    const form = document.getElementById('send-form');
+    const docForm = document.getElementById('send-doc-form');
+
+    socket.on('qr', (dataUrl) => {
+      qrImg.src = dataUrl;
+      qrImg.style.display = 'block';
+      form.style.display = 'none';
+      docForm.style.display = 'none';
+    });
+
+    socket.on('status', (msg) => {
+      statusEl.textContent = msg;
+    });
+
+    socket.on('ready', (isReady) => {
+      if (isReady) {
+        qrImg.style.display = 'none';
+        form.style.display = 'flex';
+        docForm.style.display = 'flex';
+        statusEl.textContent = 'Siap kirim pesan';
+      }
+    });
+
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const number = document.getElementById('number').value;
+      const message = document.getElementById('message').value;
+
+      statusEl.textContent = 'Mengirim...';
+      const res = await fetch('/send', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ number, message })
+      });
+      const data = await res.json();
+      statusEl.textContent = data.ok ? 'Pesan terkirim!' : `Gagal: ${data.error}`;
+    });
+
+    docForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const number = document.getElementById('doc-number').value;
+      const file = document.getElementById('doc-file').files[0];
+      const caption = document.getElementById('doc-caption').value;
+
+      const formData = new FormData();
+      formData.append('number', number);
+      formData.append('file', file);
+      formData.append('caption', caption);
+
+      statusEl.textContent = 'Mengirim dokumen...';
+      const res = await fetch('/send-document', {
+        method: 'POST',
+        body: formData // jangan set Content-Type manual, browser yang atur boundary multipart
+      });
+      const data = await res.json();
+      statusEl.textContent = data.ok ? 'Dokumen terkirim!' : `Gagal: ${data.error}`;
+    });
+  </script>
+</body>
+</html>
