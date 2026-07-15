@@ -73,6 +73,20 @@ app.post('/logout', async (req, res) => {
   }
 });
 
+// POST /connect — memulai koneksi WA secara manual
+app.post('/connect', async (req, res) => {
+  try {
+    const status = getStatus();
+    if (status) {
+      return res.json({ ok: true, message: 'WhatsApp sudah terhubung.' });
+    }
+    initWhatsApp();
+    res.json({ ok: true, message: 'Proses koneksi WhatsApp berhasil dipicu.' });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 // GET /logs — riwayat pengiriman (max 100)
 app.get('/logs', (req, res) => {
   res.json({ ok: true, logs: getLogs() });

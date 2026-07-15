@@ -26,6 +26,10 @@ function getLogs() {
 }
 
 async function initWhatsApp() {
+  if (sock && isReady) {
+    console.log('Koneksi WhatsApp sudah aktif, mengabaikan inisialisasi ganda.');
+    return sock;
+  }
   try {
     const { state, saveCreds } = await useMultiFileAuthState('auth_info');
     const { version } = await fetchLatestBaileysVersion();
