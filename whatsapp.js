@@ -59,7 +59,8 @@ async function initWhatsApp() {
         const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
 
         if (!shouldReconnect) {
-          console.log('Logged out, hapus folder auth_info untuk login ulang');
+          console.log('Logged out, mengosongkan folder auth_info untuk login ulang');
+          clearAuthInfo();
           return;
         }
 
@@ -134,6 +135,27 @@ function getLatestQr() {
   return latestQr;
 }
 
+function clearAuthInfo() {
+  const authPath = path.join(__dirname, 'auth_info');
+  if (fs.existsSync(authPath)) {
+    try {
+      // Hapus isi folder menggunakan syscall Node.js tanpa menghapus foldernya sendiri (aman untuk mountpath volume)
+      const files = fs.readdirSync(authPath);
+      for (const file of files) {
+        const curPath = path.join(authPath, file);
+        if (fs.lstatSync(curPath).isDirectory()) {
+          fs.rmSync(curPath, { recursive: true, force: true });
+        } else {
+          fs.unlinkSync(curPath);
+        }
+      }
+      console.log('Isi folder auth_info (mountpath) berhasil dikosongkan.');
+    } catch (err) {
+      console.error('Gagal mengosongkan isi folder auth_info:', err.message);
+    }
+  }
+}
+
 async function logout() {
   if (sock) {
     try {
@@ -144,13 +166,8 @@ async function logout() {
   isReady = false;
   latestQr = null;
 
-  // Hapus folder auth_info
-  const authPath = path.join(__dirname, 'auth_info');
-  if (fs.existsSync(authPath)) {
-    fs.rmSync(authPath, { recursive: true, force: true });
-  }
-
-  console.log('WhatsApp logged out, auth_info deleted');
+  clearAuthInfo();
+  console.log('WhatsApp logged out, auth_info contents cleared');
 }
 
 module.exports = { initWhatsApp, sendMessage, sendDocument, getStatus, getLatestQr, logout, getLogs };
