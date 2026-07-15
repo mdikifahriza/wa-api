@@ -5,29 +5,36 @@ const {
   DisconnectReason,
 } = require('@whiskeysockets/baileys');
 const QRCode = require('qrcode');
+const fs = require('fs');
+const path = require('path');
 
 let sock = null;
 let isReady = false;
 let reconnectAttempts = 0;
+let latestQr = null;
 
-// io = instance socket.io, dikirim dari server.js supaya file ini bisa emit event ke frontend
-async function connectToWhatsApp(io) {
+// In-memory message log (max 100 entries, FIFO)
+const messageLog = [];
+
+function appendLog(entry) {
+  messageLog.unshift({ ...entry, timestamp: new Date().toISOString() });
+  if (messageLog.length > 100) messageLog.pop();
+}
+
+function getLogs() {
+  return messageLog;
+}
+
+async function initWhatsApp() {
   try {
-    // Session disimpan di folder ./auth_info, auto-generated oleh Baileys
-    // Kalau folder ini dihapus, harus scan QR ulang
     const { state, saveCreds } = await useMultiFileAuthState('auth_info');
-
-    // Penting: versi WA Web berubah cukup sering. Kalau versi yang dipakai Baileys
-    // sudah usang dibanding server WhatsApp saat ini, koneksi gagal dengan error
-    // "Connection Failure" tepat setelah "attempting registration...".
-    // fetchLatestBaileysVersion() mengambil versi terbaru secara dinamis untuk menghindari ini.
     const { version } = await fetchLatestBaileysVersion();
     console.log('Menggunakan WA Web version:', version.join('.'));
 
     sock = makeWASocket({
       auth: state,
       version,
-      printQRInTerminal: false, // kita handle QR sendiri lewat browser, bukan terminal
+      printQRInTerminal: false,
     });
 
     sock.ev.on('creds.update', saveCreds);
@@ -36,17 +43,13 @@ async function connectToWhatsApp(io) {
       const { connection, lastDisconnect, qr } = update;
 
       if (qr) {
-        // convert QR string ke data URL image, kirim ke frontend via socket.io
-        const qrImage = await QRCode.toDataURL(qr);
-        io.emit('qr', qrImage);
-        io.emit('status', 'Scan QR code di bawah ini');
+        latestQr = await QRCode.toDataURL(qr);
       }
 
       if (connection === 'open') {
         isReady = true;
-        reconnectAttempts = 0; // reset counter begitu berhasil connect
-        io.emit('ready', true);
-        io.emit('status', 'WhatsApp terhubung!');
+        latestQr = null;
+        reconnectAttempts = 0;
         console.log('WhatsApp connected');
       }
 
@@ -55,55 +58,34 @@ async function connectToWhatsApp(io) {
         const statusCode = lastDisconnect?.error?.output?.statusCode;
         const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
 
-        io.emit('status', `Terputus: ${lastDisconnect?.error?.message || 'unknown'}`);
-        io.emit('ready', false);
-
         if (!shouldReconnect) {
           console.log('Logged out, hapus folder auth_info untuk login ulang');
           return;
         }
 
-        scheduleReconnect(io);
+        scheduleReconnect();
       }
     });
 
     return sock;
   } catch (err) {
-    // Penting: kalau bagian manapun di atas throw (fetch version gagal, auth state
-    // corrupt, dll) dan tidak ditangkap, ini jadi unhandled promise rejection yang
-    // akan mematikan SELURUH proses Node.js (termasuk Express server ikut mati).
-    // Makanya seluruh isi function ini dibungkus try-catch.
     console.error('Gagal connect ke WhatsApp:', err.message);
-    io.emit('status', `Gagal connect: ${err.message}`);
-    scheduleReconnect(io);
+    scheduleReconnect();
   }
 }
 
-function scheduleReconnect(io) {
+function scheduleReconnect() {
   reconnectAttempts += 1;
-
-  // Kalau gagal berkali-kali berturut-turut (misal loop "Connection Failure"
-  // saat registrasi), kemungkinan besar penyebabnya BUKAN masalah sementara,
-  // melainkan state auth_info yang korup dari percobaan sebelumnya, atau isu
-  // jaringan di server. Setelah 3x gagal beruntun, beri jeda lebih panjang
-  // supaya gak spam WhatsApp server dan gampang dilihat di log.
   const delay = reconnectAttempts > 3 ? 10000 : 2000;
   console.log(`Reconnecting dalam ${delay / 1000}s (percobaan ke-${reconnectAttempts})`);
-  setTimeout(() => connectToWhatsApp(io), delay);
+  setTimeout(() => initWhatsApp(), delay);
 }
 
-// Format nomor Indonesia ke JID yang dipakai Baileys.
-// Contoh: "085731591508" -> "6285731591508@s.whatsapp.net"
-//         "+6285731591508" -> "6285731591508@s.whatsapp.net"
-//         "6285731591508" -> "6285731591508@s.whatsapp.net" (sudah benar, dibiarkan)
 function toJid(number) {
-  let cleaned = number.replace(/\D/g, ''); // buang semua karakter selain digit
-
+  let cleaned = number.replace(/\D/g, '');
   if (cleaned.startsWith('0')) {
-    // nomor lokal Indonesia diawali 0 -> ganti jadi kode negara 62
     cleaned = '62' + cleaned.slice(1);
   }
-
   return `${cleaned}@s.whatsapp.net`;
 }
 
@@ -113,16 +95,14 @@ async function sendMessage(number, message) {
   }
 
   const jid = toJid(number);
-
-  // Cek dulu apakah nomor ini beneran terdaftar di WhatsApp sebelum kirim.
-  // Tanpa ini, kirim ke nomor salah/gak terdaftar bisa menggantung dan
-  // akhirnya muncul error generik "Timed Out" yang membingungkan.
   const [result] = await sock.onWhatsApp(jid);
   if (!result?.exists) {
+    appendLog({ type: 'text', to: number, message, status: 'failed', error: `Nomor ${number} tidak terdaftar di WhatsApp` });
     throw new Error(`Nomor ${number} tidak terdaftar di WhatsApp`);
   }
 
   await sock.sendMessage(result.jid, { text: message });
+  appendLog({ type: 'text', to: number, message, status: 'sent' });
 }
 
 async function sendDocument(number, filePath, fileName, mimetype, caption = '') {
@@ -131,22 +111,46 @@ async function sendDocument(number, filePath, fileName, mimetype, caption = '') 
   }
 
   const jid = toJid(number);
-
   const [result] = await sock.onWhatsApp(jid);
   if (!result?.exists) {
+    appendLog({ type: 'document', to: number, fileName, status: 'failed', error: `Nomor ${number} tidak terdaftar di WhatsApp` });
     throw new Error(`Nomor ${number} tidak terdaftar di WhatsApp`);
   }
 
   await sock.sendMessage(result.jid, {
-    document: { url: filePath }, // Baileys baca file dari path lokal via stream, hemat memori
+    document: { url: filePath },
     fileName,
     mimetype,
     caption,
   });
+  appendLog({ type: 'document', to: number, fileName, caption, status: 'sent' });
 }
 
 function getStatus() {
   return isReady;
 }
 
-module.exports = { connectToWhatsApp, sendMessage, sendDocument, getStatus };
+function getLatestQr() {
+  return latestQr;
+}
+
+async function logout() {
+  if (sock) {
+    try {
+      await sock.logout();
+    } catch (_) {}
+    sock = null;
+  }
+  isReady = false;
+  latestQr = null;
+
+  // Hapus folder auth_info
+  const authPath = path.join(__dirname, 'auth_info');
+  if (fs.existsSync(authPath)) {
+    fs.rmSync(authPath, { recursive: true, force: true });
+  }
+
+  console.log('WhatsApp logged out, auth_info deleted');
+}
+
+module.exports = { initWhatsApp, sendMessage, sendDocument, getStatus, getLatestQr, logout, getLogs };

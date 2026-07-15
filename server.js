@@ -1,75 +1,85 @@
 const express = require('express');
-const http = require('http');
-const path = require('path');
 const fs = require('fs');
 const multer = require('multer');
-const { Server } = require('socket.io');
-const { connectToWhatsApp, sendMessage, sendDocument, getStatus } = require('./whatsapp');
+const path = require('path');
+const { initWhatsApp, sendMessage, sendDocument, getStatus, getLatestQr, logout, getLogs } = require('./whatsapp');
 
-// Safety net terakhir: kalau ada promise rejection yang lolos dari try-catch
-// manapun, JANGAN biarkan proses mati (default behavior Node.js modern).
-// Cukup log errornya, server tetap hidup dan bisa terus melayani request.
 process.on('unhandledRejection', (err) => {
-  console.error('Unhandled rejection (server tetap jalan):', err);
+  console.error('Unhandled rejection:', err);
 });
 
 const app = express();
-const server = http.createServer(app);
-const io = new Server(server);
-
-// File di-upload sementara ke folder ./uploads, dihapus lagi setelah terkirim
 const upload = multer({ dest: 'uploads/' });
 
 app.use(express.json());
-app.use(express.static('public'));
 
-// Endpoint testing kirim pesan
+// Auth middleware — semua request wajib header x-api-key
+app.use((req, res, next) => {
+  const apiKey = process.env.WA_API_KEY;
+  if (apiKey && req.headers['x-api-key'] !== apiKey) {
+    return res.status(401).json({ ok: false, error: 'Unauthorized' });
+  }
+  next();
+});
+
+// GET /status — status koneksi WA
+app.get('/status', (req, res) => {
+  res.json({ ok: true, ready: getStatus() });
+});
+
+// GET /qr-base64 — QR code (null jika sudah connect)
+app.get('/qr-base64', (req, res) => {
+  res.json({ ok: true, qr: getLatestQr() });
+});
+
+// POST /send — kirim pesan teks
 app.post('/send', async (req, res) => {
   const { number, message } = req.body;
-
   if (!number || !message) {
     return res.status(400).json({ ok: false, error: 'number dan message wajib diisi' });
   }
-
   try {
     await sendMessage(number, message);
-    res.json({ ok: true, message: 'Pesan terkirim' });
+    res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
   }
 });
 
-app.get('/status', (req, res) => {
-  res.json({ ready: getStatus() });
-});
-
-// Endpoint testing kirim dokumen (PDF, dll)
+// POST /send-document — kirim dokumen (PDF, gambar, dll)
 app.post('/send-document', upload.single('file'), async (req, res) => {
   const { number, caption } = req.body;
   const file = req.file;
-
   if (!number || !file) {
     return res.status(400).json({ ok: false, error: 'number dan file wajib diisi' });
   }
-
   try {
     await sendDocument(number, file.path, file.originalname, file.mimetype, caption || '');
-    res.json({ ok: true, message: 'Dokumen terkirim' });
+    res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
   } finally {
-    // hapus file temporary setelah selesai, berhasil ataupun gagal
     fs.unlink(file.path, () => {});
   }
 });
 
-io.on('connection', (socket) => {
-  console.log('Frontend connected via socket.io');
-  socket.emit('ready', getStatus());
+// POST /logout — putus koneksi & hapus session
+app.post('/logout', async (req, res) => {
+  try {
+    await logout();
+    res.json({ ok: true, message: 'WhatsApp logout berhasil. Scan QR ulang untuk connect.' });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
 });
 
-const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => {
-  console.log(`Server jalan di http://localhost:${PORT}`);
-  connectToWhatsApp(io); // mulai koneksi WhatsApp begitu server start
+// GET /logs — riwayat pengiriman (max 100)
+app.get('/logs', (req, res) => {
+  res.json({ ok: true, logs: getLogs() });
+});
+
+const PORT = process.env.PORT || 8080;
+app.listen(PORT, () => {
+  console.log(`WA Gateway berjalan di port ${PORT}`);
+  initWhatsApp();
 });
